@@ -1,4 +1,4 @@
 Implementation of [Factored Neural Machine Translation](https://arxiv.org/abs/1609.04621).
-Tested on dummy translation task from English to both German and French. German and French words are used as the two factors.
+Tested on dummy translation task from English to both German and French. German and French words are used as the two factors. The beam pruning before the combination of factors is still missing.
 
 Run training with `rnn.py config`. After that, run search with `rnn.py config ++task search`. Note, that for now training only works if marked line in config is commented out. To output both factors, use this branch https://github.com/patrick-wilken/returnn/tree/FactoredNMT and uncomment the line with two output layers in the config.
