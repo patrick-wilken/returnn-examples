@@ -155,7 +155,8 @@ learning_rate_control = "newbob_multi_epoch"
 learning_rate_file = "model/newbob.data"
 
 # search
-search_output_layer = ["decision_de", "decision_fr"]
+search_output_layer = "decision_de"
+#search_output_layer = ["decision_de", "decision_fr"]
 search_data = one
 #search_data = test
 search_output_file = "hyp"
