@@ -1,0 +1,8 @@
+factored-nmt/model
+*.pyc
+__pycache__
+.history*
+.*.swp
+.nfs*
+*~
+
