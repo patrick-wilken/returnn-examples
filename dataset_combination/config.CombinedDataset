@@ -1,0 +1,112 @@
+#!rnn.py
+
+# task
+task = "train"
+use_tensorflow = True
+device = "gpu"
+
+# datasets
+EpochPartitions = 5
+TrainSeqOrder = "laplace:100"
+
+def get_dataset(path, corpus):
+    return {
+        "name": path + "_" + corpus,
+        "class": "TranslationDataset",
+        "path": path,
+        "file_postfix": corpus,
+        "source_postfix": " </S>",
+        "target_postfix": " </S>",
+        "unknown_label": "<UNK>",
+    }
+
+def get_combined_dataset(dataset_paths, corpus):
+    datasets = {}  # dictionary dataset_name -> Dataset containing the datasets to be combined
+    data_map = {}  # dictionary (dataset_name, dataset_data_key) -> data_key
+    for path in dataset_paths:
+        name = path + "_" + corpus
+        datasets[name] = get_dataset(path, corpus)
+        data_map[(name, "data")] = "data"       # For this setup (mulit-lingual translation) "data" and "classes" of the
+        data_map[(name, "classes")] = "classes" # TranslationDatasets are simply mapped to "data" and "classes" of the CombinedDataset.
+
+    return {"class": "CombinedDataset",
+        "datasets": datasets,
+        "data_map": data_map,
+        "partition_epoch": {"train": EpochPartitions}.get(corpus, 1),
+        "seq_ordering": {"train": TrainSeqOrder}.get(corpus, "default"),
+    }
+
+train = get_combined_dataset(["dataset_de-en_shared_voc", "dataset_fr-en_shared_voc"], "train")
+dev = get_combined_dataset(["dataset_de-en_shared_voc", "dataset_fr-en_shared_voc"], "test")
+# Usually we want to test the languages separately, so we do not use a CombinedDataset here.
+test_de = get_dataset("dataset_de-en_shared_voc", "test")
+
+# network
+SourceVocSize = 5551
+TargetVocSize = 2732
+
+EmbeddingSize = 53
+HiddenSize = 94
+
+BeamSize = 5
+SearchMaxSequenceLength = "max_len_from('encoder') * 3"
+
+network = {
+    "source_embed": {"class": "linear", "activation": None, "with_bias": False, "n_out": EmbeddingSize},
+    "lstm_fw" : { "class": "rec", "unit": "nativelstm2", "n_out" : HiddenSize, "direction": 1, "from": ["source_embed"] },
+    "lstm_bw" : { "class": "rec", "unit": "nativelstm2", "n_out" : HiddenSize, "direction": -1, "from": ["source_embed"] },
+
+    "encoder": {"class": "copy", "from": ["lstm_fw", "lstm_bw"]},
+    "enc_ctx": {"class": "linear", "activation": None, "with_bias": True, "from": ["encoder"], "n_out": HiddenSize},
+    "inv_fertility": {"class": "linear", "activation": "sigmoid", "with_bias": False, "from": ["encoder"], "n_out": 1},
+
+    "output": {"class": "rec", "from": [], "unit": {
+        "output": {"class": "choice", "target": "classes", "beam_size": BeamSize, "from": ["output_prob"], "initial_output": 0},
+        "end": {"class": "compare", "from": ["output"], "value": 0},
+        "target_embed": {"class": "linear", "activation": None, "with_bias": False, "from": ["output"], "n_out": EmbeddingSize, "initial_output": 0},
+        "weight_feedback": {"class": "linear", "activation": None, "with_bias": False, "from": ["prev:accum_att_weights"], "n_out": HiddenSize},
+        "prev_s_state": {"class": "get_last_hidden_state", "from": ["prev:s"], "n_out": 2 * HiddenSize},
+        "prev_s_transformed": {"class": "linear", "activation": None, "with_bias": False, "from": ["prev_s_state"], "n_out": HiddenSize},
+        "energy_in": {"class": "combine", "kind": "add", "from": ["base:enc_ctx", "weight_feedback", "prev_s_transformed"], "n_out": HiddenSize},
+        "energy_tanh": {"class": "activation", "activation": "tanh", "from": ["energy_in"]},
+        "energy": {"class": "linear", "activation": None, "with_bias": False, "from": ["energy_tanh"], "n_out": 1},
+        "att_weights": {"class": "softmax_over_spatial", "from": ["energy"]},
+        "accum_att_weights": {"class": "eval", "from": ["prev:accum_att_weights", "att_weights", "base:inv_fertility"],
+            "eval": "source(0) + source(1) * source(2) * 0.5", "out_type": {"dim": 1, "shape": (None, 1)}},
+        "att": {"class": "generic_attention", "weights": "att_weights", "base": "base:encoder"},
+        "s": {"class": "rnn_cell", "unit": "LSTMBlock", "from": ["target_embed", "att"], "n_out": HiddenSize},
+        "readout_in": {"class": "linear", "from": ["prev:s", "prev:target_embed", "att"], "activation": None, "n_out": HiddenSize},
+        "readout": {"class": "reduce_out", "mode": "max", "num_pieces": 2, "from": ["readout_in"]},
+        "output_prob": {
+            "class": "softmax", "from": ["readout"], "dropout": 0.3,
+            "target": "classes", "loss": "ce", "loss_opts": {"label_smoothing": 0.1}}
+    }, "target": "classes", "max_seq_len": SearchMaxSequenceLength},
+
+    "decision": {
+        "class": "decide", "from": ["output"], "loss": "edit_distance", "target": "classes",
+    }
+}
+
+num_outputs = {"data": [SourceVocSize, 1], "classes": [TargetVocSize, 1]}
+num_inputs = num_outputs["data"][0]
+
+# training
+model = "model.CombinedDataset/params"
+
+adam = True
+batch_size = 0
+max_seqs = 11
+
+learning_rate = 0.001
+learning_rate_control = "newbob_multi_epoch"
+learning_rate_file = "model.CombinedDataset/newbob.data"
+
+# search
+search_output_layer = "decision"
+search_data = test_de
+search_output_file = "hyp.CombinedDataset"
+
+# logging
+log_verbosity = 5
+debug_print_layer_output_template = True
+debug_print_layer_output_shape = False
