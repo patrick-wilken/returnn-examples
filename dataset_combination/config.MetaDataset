@@ -1,0 +1,139 @@
+#!rnn.py
+
+# task
+task = "train"
+use_tensorflow = True
+device = "gpu"
+
+# datasets
+EpochPartitions = 5
+TrainSeqOrder = "laplace:100"
+
+def get_dataset(path, corpus):
+    return {
+        "name": path + "_" + corpus,
+        "class": "TranslationDataset",
+        "path": path,
+        "file_postfix": corpus,
+        "source_postfix": " </S>",
+        "target_postfix": " </S>",
+        "unknown_label": "<UNK>",
+    }
+
+def get_meta_dataset(corpus):
+    dataset_de_en = get_dataset("dataset_de-en", corpus)
+    dataset_fr_en = get_dataset("dataset_fr-en", corpus)
+
+    # dictionary dataset_name -> Dataset containing the datasets to be combined
+    datasets = {"dataset_de-en_" + corpus: dataset_de_en, "dataset_fr-en_" + corpus: dataset_fr_en}
+
+    # dictionary data_key -> (dataset_name, dataset_data_key)
+    data_map = {"data": ("dataset_de-en_" + corpus, "data"),       # Current implementation expects one input to be called "data".
+                "data_fr": ("dataset_fr-en_" + corpus, "data"),    # "data", "data_fr" and "classes" will be the data_keys used by
+                "classes": ("dataset_de-en_" + corpus, "classes")} # the MetaDataset for the German source, French source and English
+                                                                   # target, respectively. Note, that we could have also used the English
+                                                                   # target from the fr-en TranslationDataset.
+
+    return {"class": "MetaDataset",
+        "datasets": datasets,
+        "data_map": data_map,
+        "partition_epoch": {"train": EpochPartitions}.get(corpus, 1),
+        "seq_ordering": {"train": TrainSeqOrder}.get(corpus, "default"),
+    }
+
+train = get_meta_dataset("train")
+dev = get_meta_dataset("test")
+test = dev  # Obviously, don't do this for real experiments ;)
+
+# network
+SourceVocSizeDe = 3258
+SourceVocSizeFr = 2911
+TargetVocSize = 2732
+
+EmbeddingSize = 53
+HiddenSize = 94
+
+BeamSize = 5
+SearchMaxSequenceLength = "max_len_from('encoder_de') * 3"
+
+network = {
+    "source_embed_de": {"class": "linear", "activation": None, "with_bias": False, "n_out": EmbeddingSize, "from": ["data:data"]},
+    "source_embed_fr": {"class": "linear", "activation": None, "with_bias": False, "n_out": EmbeddingSize, "from": ["data:data_fr"]},
+
+    "lstm_fw_de" : { "class": "rec", "unit": "nativelstm2", "n_out" : HiddenSize, "direction": 1, "from": ["source_embed_de"] },
+    "lstm_bw_de" : { "class": "rec", "unit": "nativelstm2", "n_out" : HiddenSize, "direction": -1, "from": ["source_embed_de"] },
+
+    "lstm_fw_fr" : { "class": "rec", "unit": "nativelstm2", "n_out" : HiddenSize, "direction": 1, "from": ["source_embed_fr"] },
+    "lstm_bw_fr" : { "class": "rec", "unit": "nativelstm2", "n_out" : HiddenSize, "direction": -1, "from": ["source_embed_fr"] },
+
+    "encoder_de": {"class": "copy", "from": ["lstm_fw_de", "lstm_bw_de"]},
+    "enc_ctx_de": {"class": "linear", "activation": None, "with_bias": True, "from": ["encoder_de"], "n_out": HiddenSize},
+    "inv_fertility_de": {"class": "linear", "activation": "sigmoid", "with_bias": False, "from": ["encoder_de"], "n_out": 1},
+
+    "encoder_fr": {"class": "copy", "from": ["lstm_fw_fr", "lstm_bw_fr"]},
+    "enc_ctx_fr": {"class": "linear", "activation": None, "with_bias": True, "from": ["encoder_fr"], "n_out": HiddenSize},
+    "inv_fertility_fr": {"class": "linear", "activation": "sigmoid", "with_bias": False, "from": ["encoder_fr"], "n_out": 1},
+
+    "output": {"class": "rec", "from": [], "unit": {
+        "output": {"class": "choice", "target": "classes", "beam_size": BeamSize, "from": ["output_prob"], "initial_output": 0},
+        "end": {"class": "compare", "from": ["output"], "value": 0},
+        "target_embed": {"class": "linear", "activation": None, "with_bias": False, "from": ["output"], "n_out": EmbeddingSize, "initial_output": 0},
+        "weight_feedback_de": {"class": "linear", "activation": None, "with_bias": False, "from": ["prev:accum_att_weights_de"], "n_out": HiddenSize},
+        "weight_feedback_fr": {"class": "linear", "activation": None, "with_bias": False, "from": ["prev:accum_att_weights_fr"], "n_out": HiddenSize},
+        "prev_s_state": {"class": "get_last_hidden_state", "from": ["prev:s"], "n_out": 2 * HiddenSize},
+        "prev_s_transformed": {"class": "linear", "activation": None, "with_bias": False, "from": ["prev_s_state"], "n_out": HiddenSize},
+
+        "energy_in_de": {"class": "combine", "kind": "add", "from": ["base:enc_ctx_de", "weight_feedback_de", "prev_s_transformed"], "n_out": HiddenSize},
+        "energy_tanh_de": {"class": "activation", "activation": "tanh", "from": ["energy_in_de"]},
+        "energy_de": {"class": "linear", "activation": None, "with_bias": False, "from": ["energy_tanh_de"], "n_out": 1},
+        "att_weights_de": {"class": "softmax_over_spatial", "from": ["energy_de"]},
+        "accum_att_weights_de": {"class": "eval", "from": ["prev:accum_att_weights_de", "att_weights_de", "base:inv_fertility_de"],
+            "eval": "source(0) + source(1) * source(2) * 0.5", "out_type": {"dim": 1, "shape": (None, 1)}},
+        "att_de": {"class": "generic_attention", "weights": "att_weights_de", "base": "base:encoder_de"},
+
+        "energy_in_fr": {"class": "combine", "kind": "add", "from": ["base:enc_ctx_fr", "weight_feedback_fr", "prev_s_transformed"], "n_out": HiddenSize},
+        "energy_tanh_fr": {"class": "activation", "activation": "tanh", "from": ["energy_in_fr"]},
+        "energy_fr": {"class": "linear", "activation": None, "with_bias": False, "from": ["energy_tanh_fr"], "n_out": 1},
+        "att_weights_fr": {"class": "softmax_over_spatial", "from": ["energy_fr"]},
+        "accum_att_weights_fr": {"class": "eval", "from": ["prev:accum_att_weights_fr", "att_weights_fr", "base:inv_fertility_fr"],
+            "eval": "source(0) + source(1) * source(2) * 0.5", "out_type": {"dim": 1, "shape": (None, 1)}},
+        "att_fr": {"class": "generic_attention", "weights": "att_weights_fr", "base": "base:encoder_fr"},
+
+        "att": {"class": "copy", "from": ["att_de", "att_fr"]},
+
+        "s": {"class": "rnn_cell", "unit": "LSTMBlock", "from": ["target_embed", "att"], "n_out": HiddenSize},
+        "readout_in": {"class": "linear", "from": ["prev:s", "prev:target_embed", "att"], "activation": None, "n_out": HiddenSize},
+        "readout": {"class": "reduce_out", "mode": "max", "num_pieces": 2, "from": ["readout_in"]},
+        "output_prob": {
+            "class": "softmax", "from": ["readout"], "dropout": 0.3,
+            "target": "classes", "loss": "ce", "loss_opts": {"label_smoothing": 0.1}}
+    }, "target": "classes", "max_seq_len": SearchMaxSequenceLength},
+
+    "decision": {
+        "class": "decide", "from": ["output"], "loss": "edit_distance", "target": "classes",
+    }
+}
+
+num_outputs = {"data": [SourceVocSizeDe, 1], "data_fr": [SourceVocSizeFr, 1], "classes": [TargetVocSize, 1]}
+num_inputs = num_outputs["data"][0]
+
+# training
+model = "model.MetaDataset/params"
+
+adam = True
+batch_size = 0
+max_seqs = 11
+
+learning_rate = 0.001
+learning_rate_control = "newbob_multi_epoch"
+learning_rate_file = "model.MetaDataset/newbob.data"
+
+# search
+search_output_layer = "decision"
+search_data = test
+search_output_file = "hyp.MetaDataset"
+
+# logging
+log_verbosity = 5
+debug_print_layer_output_template = True
+debug_print_layer_output_shape = False
