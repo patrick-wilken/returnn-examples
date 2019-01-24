@@ -8,7 +8,6 @@ device = "gpu"
 # datasets
 EpochPartitions = 1
 TrainSeqOrder = "laplace:30"
-#TrainSeqOrder = "default"
 
 def get_dataset(path, corpus):
     return {
@@ -33,51 +32,25 @@ train = {"class": "MetaDataset",
     "seq_ordering": TrainSeqOrder,
 }
 
-dev_en_de = get_dataset("dataset_en-de", "test")
-dev_en_fr = get_dataset("dataset_en-fr", "test")
-
-dev = {"class": "MetaDataset",
-    "datasets": {"en-de": dev_en_de, "en-fr": dev_en_fr},
-    "data_map": {"data": ("en-de", "data"),
-        "classes_de": ("en-de", "classes"),
-        "classes_fr": ("en-fr", "classes")},
-    "partition_epoch": 1,
-    "seq_ordering": "sorted",
-}
-
-test = dev # Obviously, don't do this for real experiments :)
-
-one_en_de = get_dataset("dataset_en-de", "one")
-one_en_fr = get_dataset("dataset_en-fr", "one")
-
-one = {"class": "MetaDataset",
-    "datasets": {"en-de": one_en_de, "en-fr": one_en_fr},
-    "data_map": {"data": ("en-de", "data"),
-        "classes_de": ("en-de", "classes"),
-        "classes_fr": ("en-fr", "classes")},
-    "partition_epoch": 1,
-    "seq_ordering": "sorted",
-}
+# to check if we can overfit on toy data
+dev = train
+test = train
 
 # network
 SourceVocSize = 2732
 TargetVocSizeDe = 3258
 TargetVocSizeFr = 2911
 
-EmbeddingSize = 53
-HiddenSize = 94
+EmbeddingSize = 200
+HiddenSize = 200
 
-BeamSize = 5
+BeamSize = 12
+BeamSizeDe = 6
+BeamSizeFr = 6
 SearchMaxSequenceLength = "max_len_from('encoder') * 3"
 
 network = {
-    "combine_classes": {"class": "eval", "from": ["data:classes_de", "data:classes_fr"],
-        "eval": "source(0) * {} + source(1)".format(TargetVocSizeFr), "register_as_extern_data": "classes_combined",
-        "out_type": {"dim": TargetVocSizeDe * TargetVocSizeFr, "sparse": True}},
-
     "source_embed": {"class": "linear", "activation": None, "with_bias": False, "n_out": EmbeddingSize},
-
-    "lstm_fw" : { "class": "rec", "unit": "nativelstm2", "n_out" : HiddenSize, "direction": 1, "from": ["source_embed"] },
 
     "lstm_fw" : { "class": "rec", "unit": "nativelstm2", "n_out" : HiddenSize, "direction": 1, "from": ["source_embed"] },
     "lstm_bw" : { "class": "rec", "unit": "nativelstm2", "n_out" : HiddenSize, "direction": -1, "from": ["source_embed"] },
@@ -87,7 +60,7 @@ network = {
     "inv_fertility": {"class": "linear", "activation": "sigmoid", "with_bias": False, "from": ["encoder"], "n_out": 1},
 
     "output": {"class": "rec", "from": [], "unit": {
-        "end": {"class": "compare", "from": ["output_de"], "value": 0},
+        "end": {"class": "compare", "from": ["output_de"], "value": 0}, # "from": ["output/out_0"] would also work
         "target_embed": {"class": "linear", "activation": None, "with_bias": False, "from": ["output_de"], "n_out": EmbeddingSize, "initial_output": 0},
         "weight_feedback": {"class": "linear", "activation": None, "with_bias": False, "from": ["prev:accum_att_weights"], "n_out": HiddenSize},
         "prev_s_state": {"class": "get_last_hidden_state", "from": ["prev:s"], "n_out": 2 * HiddenSize},
@@ -103,40 +76,27 @@ network = {
         "readout_in": {"class": "linear", "from": ["prev:s", "prev:target_embed", "att"], "activation": None, "n_out": HiddenSize},
         "readout": {"class": "reduce_out", "mode": "max", "num_pieces": 2, "from": ["readout_in"]},
 
-        "output_prob_de": {
-            "class": "softmax", "from": ["readout"], "dropout": 0.3,
-            "target": "classes_de", "loss": "ce", "loss_opts": {"label_smoothing": 0.1}},
-        "output_prob_fr": {
-            "class": "softmax", "from": ["readout"], "dropout": 0.3,
-            "target": "classes_fr", "loss": "ce", "loss_opts": {"label_smoothing": 0.1}},
+        "output_prob_de": {"class": "softmax", "from": ["readout"], "dropout": 0.3, "target": "classes_de", "loss": "ce",
+            "loss_opts": {"label_smoothing": 0.1}},
+        "output_prob_fr": {"class": "softmax", "from": ["readout"], "dropout": 0.3, "target": "classes_fr", "loss": "ce",
+            "loss_opts": {"label_smoothing": 0.1}},
+        "output": {"class": "choice", "from": ["output_prob_de", "output_prob_fr"], "target": ["classes_de", "classes_fr"],
+            "beam_size": BeamSize, "source_beam_sizes": [BeamSizeDe, BeamSizeFr],
+        },
 
-        "output_prob_de_expanded": {
-            "class": "expand_dims", "from": ["output_prob_de"], "axis": "feature"},
-        "output_prob_fr_expanded": {
-            "class": "expand_dims", "from": ["output_prob_fr"], "axis": "feature"},
+        # Give proper names to out_0 and out_1.
+        # Also, we have to explicitly make out_1 an output layer (as it is not used inside the recurrent unit).
+        "output_de": {"class": "copy", "from": ["output/out_0"], "is_output_layer": True},
+        "output_fr": {"class": "copy", "from": ["output/out_1"], "is_output_layer": True},
 
-        "output_prob_combined_matrix": {
-            "class": "dot", "from": ["output_prob_de_expanded", "output_prob_fr_expanded"], "red2": -1, "var2": -2, "debug": True},
+    }, "target": "classes_de", "max_seq_len": SearchMaxSequenceLength},
 
-        "output_prob_combined": {
-            "class": "merge_dims", "from": ["output_prob_combined_matrix"], "axes": "except_batch"},
+    # target only needed here if used as search_output_layer
+    "output_de": {"class": "get_rec_accumulated", "from": ["output"], "sub_layer": "output_de", "target": "classes_de"},
+    "output_fr": {"class": "get_rec_accumulated", "from": ["output"], "sub_layer": "output_fr", "target": "classes_fr"},
 
-        "output": {"class": "choice", "target": "classes_combined", "from": ["output_prob_combined"], "beam_size": BeamSize, "initial_output": 0},
-        "output_de": {"class": "eval", "from": ["output"], "eval": "tf.floordiv(x=source(0), y={})".format(TargetVocSizeFr), "out_type": {
-            "shape": (),  #### This line has to be commented for training! :( ####
-            "dim": TargetVocSizeDe, "sparse": True,
-        }},
-
-    }, "target": "classes_combined", "max_seq_len": SearchMaxSequenceLength},
-
-    "decision": {
-        "class": "decide", "from": ["output"], "loss": "edit_distance", "target": "classes_combined",
-    },
-
-    "decision_de": {"class": "eval", "from": ["decision"], "eval": "tf.floordiv(x=source(0), y={})".format(TargetVocSizeFr),
-        "loss": "edit_distance", "target": "classes_de", "out_type": {"dim": TargetVocSizeDe, "sparse": True}},
-    "decision_fr": {"class": "eval", "from": ["decision"], "eval": "tf.floormod(x=source(0), y={})".format(TargetVocSizeFr),
-        "loss": "edit_distance", "target": "classes_fr", "out_type": {"dim": TargetVocSizeFr, "sparse": True}},
+    "decision_de": {"class": "decide", "from": ["output_de"], "loss": "edit_distance", "target": "classes_de"},
+    "decision_fr": {"class": "decide", "from": ["output_fr"], "loss": "edit_distance", "target": "classes_fr"},
 }
 
 num_outputs = {"data": [SourceVocSize, 1], "classes_de": [TargetVocSizeDe, 1], "classes_fr": [TargetVocSizeFr, 1]}
@@ -155,11 +115,11 @@ learning_rate_control = "newbob_multi_epoch"
 learning_rate_file = "model/newbob.data"
 
 # search
-search_output_layer = "decision_de"
-#search_output_layer = ["decision_de", "decision_fr"]
-search_data = one
-#search_data = test
+#search_output_layer = ["output_de", "output_fr"]
+search_output_layer = ["decision_de", "decision_fr"]
+search_data = test
 search_output_file = "hyp"
+search_output_file_format = "py"
 
 # logging
 debug_print_layer_output_template = True
