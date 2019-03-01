@@ -20,30 +20,27 @@ def get_dataset(path, corpus):
         "unknown_label": "<UNK>",
     }
 
-def get_meta_dataset(corpus):
-    dataset_de_en = get_dataset("dataset_de-en", corpus)
-    dataset_fr_en = get_dataset("dataset_fr-en", corpus)
+train_de_en = get_dataset("dataset_de-en", "train")
+train_fr_en = get_dataset("dataset_fr-en", "train")
 
-    # dictionary dataset_name -> Dataset containing the datasets to be combined
-    datasets = {"dataset_de-en_" + corpus: dataset_de_en, "dataset_fr-en_" + corpus: dataset_fr_en}
+train = {"class": "MetaDataset",
+    "datasets": {"de-en": train_de_en, "fr-en": train_fr_en},
+    "data_map": {"data": ("de-en", "data"), # Current implementation expects one input to be called "data".
+        "data_fr": ("fr-en", "data"),       # "data", "data_fr" and "classes" will be the data_keys used by
+        "classes": ("de-en", "classes")},   # the MetaDataset for the German source, French source and English
+    "partition_epoch": EpochPartitions,     # target, respectively. Note, that we could have also used the English
+    "seq_ordering": TrainSeqOrder,          # target from the fr-en TranslationDataset.
+}
 
-    # dictionary data_key -> (dataset_name, dataset_data_key)
-    data_map = {"data": ("dataset_de-en_" + corpus, "data"),       # Current implementation expects one input to be called "data".
-                "data_fr": ("dataset_fr-en_" + corpus, "data"),    # "data", "data_fr" and "classes" will be the data_keys used by
-                "classes": ("dataset_de-en_" + corpus, "classes")} # the MetaDataset for the German source, French source and English
-                                                                   # target, respectively. Note, that we could have also used the English
-                                                                   # target from the fr-en TranslationDataset.
+dev_de_en = get_dataset("dataset_de-en", "dev")
+dev_fr_en = get_dataset("dataset_fr-en", "dev")
 
-    return {"class": "MetaDataset",
-        "datasets": datasets,
-        "data_map": data_map,
-        "partition_epoch": {"train": EpochPartitions}.get(corpus, 1),
-        "seq_ordering": {"train": TrainSeqOrder}.get(corpus, "default"),
-    }
-
-train = get_meta_dataset("train")
-dev = get_meta_dataset("test")
-test = dev  # Obviously, don't do this for real experiments ;)
+dev = {"class": "MetaDataset",
+    "datasets": {"de-en": dev_de_en, "fr-en": dev_fr_en},
+    "data_map": {"data": ("de-en", "data"),
+        "data_fr": ("fr-en", "data"),
+        "classes": ("de-en", "classes")},
+}
 
 # network
 SourceVocSizeDe = 3258
@@ -130,7 +127,7 @@ learning_rate_file = "model.MetaDataset/newbob.data"
 
 # search
 search_output_layer = "decision"
-search_data = test
+search_data = dev
 search_output_file = "hyp.MetaDataset"
 
 # logging

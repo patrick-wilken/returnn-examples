@@ -7,9 +7,9 @@ device = "gpu"
 
 # datasets
 EpochPartitions = 5
-TrainSeqOrder = "laplace:100"
+TrainSeqOrder = "laplace:10"
 
-def get_dataset(path, corpus):
+def get_dataset(path, corpus, repeat_epoch=None):
     return {
         "name": path + "_" + corpus,
         "class": "TranslationDataset",
@@ -18,28 +18,32 @@ def get_dataset(path, corpus):
         "source_postfix": " </S>",
         "target_postfix": " </S>",
         "unknown_label": "<UNK>",
+        "repeat_epoch": repeat_epoch,
     }
 
-def get_combined_dataset(dataset_paths, corpus):
-    datasets = {}  # dictionary dataset_name -> Dataset containing the datasets to be combined
-    data_map = {}  # dictionary (dataset_name, dataset_data_key) -> data_key
-    for path in dataset_paths:
-        name = path + "_" + corpus
-        datasets[name] = get_dataset(path, corpus)
-        data_map[(name, "data")] = "data"       # For this setup (mulit-lingual translation) "data" and "classes" of the
-        data_map[(name, "classes")] = "classes" # TranslationDatasets are simply mapped to "data" and "classes" of the CombinedDataset.
+train_de_en = get_dataset("dataset_de-en_shared_voc", "train")
+train_fr_en = get_dataset("dataset_fr-en_shared_voc", "train", repeat_epoch=3)
 
-    return {"class": "CombinedDataset",
-        "datasets": datasets,
-        "data_map": data_map,
-        "partition_epoch": {"train": EpochPartitions}.get(corpus, 1),
-        "seq_ordering": {"train": TrainSeqOrder}.get(corpus, "default"),
-    }
+train = {"class": "CombinedDataset",
+     "datasets": {"de-en": train_de_en, "fr-en": train_fr_en},
+     "data_map": {("de-en", "data"): "data",       # For this setup (multi-lingual translation), "data" and "classes"
+                  ("de-en", "classes"): "classes", # of the TranslationDatasets are simply mapped to "data" and
+                  ("fr-en", "data"): "data",       # "classes" of the CombinedDataset.
+                  ("fr-en", "classes"): "classes"},
+     "partition_epoch": EpochPartitions,
+     "seq_ordering": TrainSeqOrder,
+}
 
-train = get_combined_dataset(["dataset_de-en_shared_voc", "dataset_fr-en_shared_voc"], "train")
-dev = get_combined_dataset(["dataset_de-en_shared_voc", "dataset_fr-en_shared_voc"], "test")
-# Usually we want to test the languages separately, so we do not use a CombinedDataset here.
-test_de = get_dataset("dataset_de-en_shared_voc", "test")
+dev_de_en = get_dataset("dataset_de-en_shared_voc", "dev")
+dev_fr_en = get_dataset("dataset_fr-en_shared_voc", "dev")
+
+dev = {"class": "CombinedDataset",
+     "datasets": {"de-en": dev_de_en, "fr-en": dev_fr_en},
+     "data_map": {("de-en", "data"): "data",
+                  ("de-en", "classes"): "classes",
+                  ("fr-en", "data"): "data",
+                  ("fr-en", "classes"): "classes"},
+}
 
 # network
 SourceVocSize = 5551
@@ -103,7 +107,7 @@ learning_rate_file = "model.CombinedDataset/newbob.data"
 
 # search
 search_output_layer = "decision"
-search_data = test_de
+search_data = dev_de_en
 search_output_file = "hyp.CombinedDataset"
 
 # logging

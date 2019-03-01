@@ -23,8 +23,7 @@ def get_dataset(path, corpus):
     }
 
 train = get_dataset("dataset_de-en", "train")
-dev = get_dataset("dataset_de-en", "test")
-test = get_dataset("dataset_de-en", "test")
+dev = get_dataset("dataset_de-en", "dev")
 
 # network
 SourceVocSize = 3258
@@ -88,7 +87,7 @@ learning_rate_file = "model.Base/newbob.data"
 
 # search
 search_output_layer = "decision"
-search_data = test
+search_data = dev
 search_output_file = "hyp.Base"
 
 # logging
